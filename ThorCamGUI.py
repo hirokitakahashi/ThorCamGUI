@@ -18,10 +18,11 @@ except ImportError:
     configure_path = None
 
 
-class ThorCamWindow(pg.GraphicsLayoutWidget):
+class ThorCamWindow(QtGui.QMainWindow):
     def __init__(self):
         super().__init__()
         self.initUI()
+        self.createMenu()
         self.initCameras()
         if self.camera:
             self.timer = QtCore.QTimer()
@@ -30,14 +31,54 @@ class ThorCamWindow(pg.GraphicsLayoutWidget):
     
     def initUI(self):
         self.setWindowTitle('Thorlab Camera Interface')
-        self.resize(1000,1000)
-        self.plot = pg.PlotItem()
-        self.plot.setAspectLocked(True)
-        self.setCentralWidget(self.plot)
-        self.plot.showAxis('left')
+        self.resize(1500,1000)
+        self.maincontainer = QtGui.QWidget() 
+        self.hbox = QtGui.QHBoxLayout()
+        self.vbox = QtGui.QVBoxLayout()
         self.img = pg.ImageItem(border='w')
+        self.plot = pg.PlotWidget(self)
+        self.plot_h = pg.plot()
+        self.data_h = self.plot_h.plot()
+        self.plot_v = pg.plot()
+        self.data_v = self.plot_v.plot()
         self.plot.addItem(self.img)
+        self.vbox.addWidget(self.plot_h)
+        self.vbox.addWidget(self.plot_v)
+        self.hbox.addWidget(self.plot)
+        self.hbox.addLayout(self.vbox)
+        self.maincontainer.setLayout(self.hbox)
+        self.setCentralWidget(self.maincontainer)
         self.show()
+        
+    def createMenu(self):
+        # create menubar
+        menu_bar = self.menuBar()
+        
+        file_menu = menu_bar.addMenu('File')
+        tools_menu = menu_bar.addMenu('Tools')
+        help_menu = menu_bar.addMenu('Help')
+        
+        # Define actions
+        exit_act = QtGui.QAction('Exit', self)
+        exit_act.setShortcut('Çtrl+Q')
+        exit_act.triggered.connect(self.close)
+        
+        settings_act = QtGui.QAction('Settings', self)
+        settings_act.triggered.connect(self.openSettingsDialog)
+        about_act = QtGui.QAction('About', self)
+        about_act.triggered.connect(self.aboutDialog)
+        
+        file_menu.addSeparator()
+        file_menu.addAction(exit_act)
+        tools_menu.addAction(settings_act)
+        help_menu.addAction(about_act)
+    
+    def openSettingsDialog(self):
+        #self.ps_dialog = SettingsDialog(self)
+        pass
+        
+    def aboutDialog(self):
+        QtGui.QMessageBox.about(self, "ThorCamGui", "This software displays the image of a Thorlab scientific camera.")
     
     def initCameras(self):
         self.sdk = TLCameraSDK()
@@ -60,10 +101,19 @@ class ThorCamWindow(pg.GraphicsLayoutWidget):
         if frame is not None:
             self.image_buffer = np.copy(frame.image_buffer)
             self.img.setImage(self.image_buffer)
+            proj_h, proj_v = self.getProjs(self.image_buffer)
+            self.data_h.setData(proj_h)
+            self.data_v.setData(proj_v)
+    
+    def getProjs(self, image):
+        proj_h = image.sum(axis=0)
+        proj_v = image.sum(axis=1)
+        return (proj_h, proj_v)
     
     def closeEvent(self, event):
         # override the closing behaviour
-        self.sdk.__del__()
+        self.camera.dispose()
+        self.sdk.dispose()
         self.timer.stop()
         event.accept()
         
