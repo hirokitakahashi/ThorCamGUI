@@ -9,6 +9,7 @@ from pyqtgraph.Qt import QtGui, QtCore
 import numpy as np
 import sys
 from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
+from scipy.optimize import curve_fit
 
 try:
     # if on Windows, use the provided setup script to add the DLLs folder to the PATH
@@ -17,13 +18,58 @@ try:
 except ImportError:
     configure_path = None
 
+def GaussFunc(x, A=1, x0=0, s=1, d=0):
+    return A*np.exp(-(x-x0)**2/s**2)+d
 
+def check_concave(x, y):
+    # This function checks if the given dataset is concave or not.
+    ind = np.argsort(x)
+    yy = y[ind]
+    xx = x[ind]
+    # make a line through (xx[0], yy[0]) and (xx[-1], yy[-1])
+    line = (yy[-1]-yy[0])/(xx[-1]-xx[0])*xx+(yy[0]*xx[-1]-yy[-1]*xx[0])/(xx[-1]-xx[0])
+    d = yy-line
+    if np.mean(d)>0:
+        return True
+    else:
+        return False
+
+def EstimateGaussIni(x, y):
+     # estimate initial parameters for fit
+     concave = check_concave(x, y)
+     if concave:
+         miny = np.min(y)
+         maxy = np.max(y)
+         imax = np.argmax(y)
+         x0 = x[imax]
+         iyh = np.nonzero(y > 0.6*maxy + 0.4*miny)[0]
+         s = (x[iyh[-1]]-x[iyh[0]])/2
+         p = np.array([maxy-miny, x0, s, miny])
+     else:
+         miny = np.min(y)
+         maxy = np.max(y)
+         imin = np.argmin(y)
+         x0 = x[imin]
+         iyh = np.nonzero(y < 0.6*miny + 0.4*maxy)[0]
+         s = (x[iyh[-1]]-x[iyh[0]])/2
+         p = np.array([miny-maxy, x0, s, maxy])
+     return p
+ 
+def GaussFit(x, y):
+    p0 = EstimateGaussIni(x, y)
+    popt, pcov = curve_fit(GaussFunc, x, y, p0)
+    yfit = GaussFunc(x, popt[0], popt[1], popt[2], popt[3])
+    return popt, yfit
+                     
 class ThorCamWindow(QtGui.QMainWindow):
     def __init__(self):
         super().__init__()
         self.initUI()
         self.createMenu()
         self.initCameras()
+        # initialize fit data to None
+        self.fit_h = None
+        self.fit_v = None
         if self.camera:
             self.timer = QtCore.QTimer()
             self.timer.timeout.connect(self.updateImage)
@@ -35,16 +81,31 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.maincontainer = QtGui.QWidget() 
         self.hbox = QtGui.QHBoxLayout()
         self.vbox = QtGui.QVBoxLayout()
+        self.hbox2 = QtGui.QHBoxLayout() # horizoantl layout in vbox
         self.img = pg.ImageItem(border='w')
-        self.plot = pg.PlotWidget(self)
-        self.plot_h = pg.plot()
-        self.data_h = self.plot_h.plot()
-        self.plot_v = pg.plot()
-        self.data_v = self.plot_v.plot()
-        self.plot.addItem(self.img)
+        # plots
+        self.plot2D = pg.PlotWidget(self) # camera image
+        self.plot_h = pg.plot() # horizontal projection
+        self.data_h = self.plot_h.plot() # create PlotDataItem for horizontal projection
+        self.plot_v = pg.plot() # vertical projection
+        self.data_v = self.plot_v.plot() # create PlotDataItem for vertical projection
+        self.plot2D.addItem(self.img)
+        # buttons
+        self.fit_button = QtGui.QPushButton("Fit", self)
+        self.fit_button.clicked.connect(self.fitButtonClicked)
+        self.stop_button = QtGui.QPushButton("Stop", self)
+        self.stop_button.setStyleSheet('QPushButton {color: red;}')
+        self.stop_button.clicked.connect(self.stopButtonClicked)
+        self.hbox2.addStretch()
+        self.hbox2.addWidget(self.fit_button)
+        self.hbox2.addStretch()
+        self.hbox2.addWidget(self.stop_button)
+        self.hbox2.addStretch()
+        # arrange widgets
         self.vbox.addWidget(self.plot_h)
         self.vbox.addWidget(self.plot_v)
-        self.hbox.addWidget(self.plot)
+        self.vbox.addLayout(self.hbox2)
+        self.hbox.addWidget(self.plot2D)
         self.hbox.addLayout(self.vbox)
         self.maincontainer.setLayout(self.hbox)
         self.setCentralWidget(self.maincontainer)
@@ -101,14 +162,40 @@ class ThorCamWindow(QtGui.QMainWindow):
         if frame is not None:
             self.image_buffer = np.copy(frame.image_buffer)
             self.img.setImage(self.image_buffer)
-            proj_h, proj_v = self.getProjs(self.image_buffer)
-            self.data_h.setData(proj_h)
-            self.data_v.setData(proj_v)
+            self.proj_h, self.proj_v = self.getProjs(self.image_buffer)
+            self.data_h.setData(self.proj_h)
+            self.data_v.setData(self.proj_v)
     
     def getProjs(self, image):
-        proj_h = image.sum(axis=0)
-        proj_v = image.sum(axis=1)
+        proj_h = image.sum(axis=1)
+        proj_v = image.sum(axis=0)
         return (proj_h, proj_v)
+    
+    def stopButtonClicked(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            self.stop_button.setText('Start')
+        else:
+            self.timer.start()
+            self.stop_button.setText('Stop')
+    
+    def fitButtonClicked(self):
+        xh = np.arange(0, len(self.proj_h))
+        xv = np.arange(0, len(self.proj_v))
+        popt_h, yfit_h = GaussFit(xh, self.proj_h)
+        popt_v, yfit_v = GaussFit(xv, self.proj_v)
+        if self.fit_h == None:
+            self.fit_h = pg.PlotDataItem(xh, yfit_h, pen={'color': 'r', 'width': 1})
+            self.plot_h.addItem(self.fit_h)
+        else:
+            self.fit_h.setData(xh, yfit_h)
+        
+        if self.fit_v == None:
+            self.fit_v = pg.PlotDataItem(xv, yfit_v, pen={'color': 'r', 'width': 1})
+            self.plot_v.addItem(self.fit_v)
+        else:
+            self.fit_v.setData(xv, yfit_v, pen={'color': 'r', 'width': 1})
+        
     
     def closeEvent(self, event):
         # override the closing behaviour
