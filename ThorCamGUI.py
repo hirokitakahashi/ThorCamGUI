@@ -64,16 +64,30 @@ def GaussFit(x, y):
 class ThorCamWindow(QtGui.QMainWindow):
     def __init__(self):
         super().__init__()
+        self.initParams()
         self.initUI()
         self.createMenu()
         self.initCameras()
         # initialize fit data to None
         self.fit_h = None
         self.fit_v = None
+        # initialize h and v axis to None
+        self.haxis = None
+        self.vaxis = None
         if self.camera:
             self.timer = QtCore.QTimer()
             self.timer.timeout.connect(self.updateImage)
             self.timer.start(10) # update image at every 10ms
+    
+    def initParams(self):
+        self.image_update_time = 10 # 10ms
+        self.exposure_time = 110
+        self.num_avg = 1
+        self.pxsize_h = 3.45
+        self.pxsize_v = 3.45
+    
+    def updateParams(self):
+        pass
     
     def initUI(self):
         self.setWindowTitle('Thorlab Camera Interface')
@@ -82,6 +96,9 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.hbox = QtGui.QHBoxLayout()
         self.vbox = QtGui.QVBoxLayout()
         self.hbox2 = QtGui.QHBoxLayout() # horizoantl layout in vbox
+        self.vbox2L = QtGui.QVBoxLayout() # vertical layout in hbox2
+        self.vbox2R = QtGui.QHBoxLayout() # vertical layout in hbox2
+        
         self.img = pg.ImageItem(border='w')
         # plots
         self.plot2D = pg.PlotWidget(self) # camera image
@@ -93,13 +110,30 @@ class ThorCamWindow(QtGui.QMainWindow):
         # buttons
         self.fit_button = QtGui.QPushButton("Fit", self)
         self.fit_button.clicked.connect(self.fitButtonClicked)
+        self.wh_disp = QtGui.QLineEdit(self)
+        self.wv_disp = QtGui.QLineEdit(self)
+        self.w_form = QtGui.QFormLayout()
+        self.w_form.addRow("w (H):", self.wh_disp)
+        self.w_form.addRow("w (V):", self.wv_disp)
+        
+        self.vbox2L.addStretch()
+        self.vbox2L.addWidget(self.fit_button)
+        self.vbox2L.addStretch()
+        self.vbox2L.addLayout(self.w_form)
+        self.vbox2L.addStretch()
+        
         self.stop_button = QtGui.QPushButton("Stop", self)
         self.stop_button.setStyleSheet('QPushButton {color: red;}')
         self.stop_button.clicked.connect(self.stopButtonClicked)
+        
+        self.vbox2R.addStretch()
+        self.vbox2R.addWidget(self.stop_button)
+        self.vbox2R.addStretch()
+        
         self.hbox2.addStretch()
-        self.hbox2.addWidget(self.fit_button)
+        self.hbox2.addLayout(self.vbox2L)
         self.hbox2.addStretch()
-        self.hbox2.addWidget(self.stop_button)
+        self.hbox2.addLayout(self.vbox2R)
         self.hbox2.addStretch()
         # arrange widgets
         self.vbox.addWidget(self.plot_h)
@@ -135,8 +169,7 @@ class ThorCamWindow(QtGui.QMainWindow):
         help_menu.addAction(about_act)
     
     def openSettingsDialog(self):
-        #self.ps_dialog = SettingsDialog(self)
-        pass
+        self.sdialog = SettingsDialog(self)
         
     def aboutDialog(self):
         QtGui.QMessageBox.about(self, "ThorCamGui", "This software displays the image of a Thorlab scientific camera.")
@@ -163,8 +196,11 @@ class ThorCamWindow(QtGui.QMainWindow):
             self.image_buffer = np.copy(frame.image_buffer)
             self.img.setImage(self.image_buffer)
             self.proj_h, self.proj_v = self.getProjs(self.image_buffer)
-            self.data_h.setData(self.proj_h)
-            self.data_v.setData(self.proj_v)
+            if self.haxis is None or self.vaxis is None:
+                self.haxis = self.pxsize_h*np.arange(0, len(self.proj_h))
+                self.vaxis = self.pxsize_v*np.arange(0, len(self.proj_v))
+            self.data_h.setData(self.haxis, self.proj_h)
+            self.data_v.setData(self.vaxis, self.proj_v)
     
     def getProjs(self, image):
         proj_h = image.sum(axis=1)
@@ -180,21 +216,21 @@ class ThorCamWindow(QtGui.QMainWindow):
             self.stop_button.setText('Stop')
     
     def fitButtonClicked(self):
-        xh = np.arange(0, len(self.proj_h))
-        xv = np.arange(0, len(self.proj_v))
-        popt_h, yfit_h = GaussFit(xh, self.proj_h)
-        popt_v, yfit_v = GaussFit(xv, self.proj_v)
+        popt_h, yfit_h = GaussFit(self.haxis, self.proj_h)
+        popt_v, yfit_v = GaussFit(self.vaxis, self.proj_v)
         if self.fit_h == None:
-            self.fit_h = pg.PlotDataItem(xh, yfit_h, pen={'color': 'r', 'width': 1})
+            self.fit_h = pg.PlotDataItem(self.haxis, yfit_h, pen={'color': 'r', 'width': 1})
             self.plot_h.addItem(self.fit_h)
         else:
-            self.fit_h.setData(xh, yfit_h)
+            self.fit_h.setData(self.haxis, yfit_h)
         
         if self.fit_v == None:
-            self.fit_v = pg.PlotDataItem(xv, yfit_v, pen={'color': 'r', 'width': 1})
+            self.fit_v = pg.PlotDataItem(self.vaxis, yfit_v, pen={'color': 'r', 'width': 1})
             self.plot_v.addItem(self.fit_v)
         else:
-            self.fit_v.setData(xv, yfit_v, pen={'color': 'r', 'width': 1})
+            self.fit_v.setData(self.vaxis, yfit_v, pen={'color': 'r', 'width': 1})
+        self.wh_disp.setText(str(popt_h[2]))
+        self.wv_disp.setText(str(popt_v[2]))
         
     
     def closeEvent(self, event):
@@ -203,7 +239,71 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.sdk.dispose()
         self.timer.stop()
         event.accept()
+
+class SettingsDialog(QtGui.QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.initUI(parent)
         
+    def initUI(self, parent):
+        self.setGeometry(300, 300, 500, 500)
+        self.setWindowTitle("ThorCam GUI settings")
+        self.parent = parent
+        self.createWidgets()
+        self.show()
+        
+    def createWidgets(self):
+        self.image_update_sb = QtGui.QSpinBox()
+        self.image_update_sb.setRange(1, 1000)
+        self.image_update_sb.setValue(self.parent.image_update_time)
+        
+        self.exposure_sb = QtGui.QSpinBox()
+        self.exposure_sb.setRange(1, 1000000)
+        self.exposure_sb.setValue(self.parent.exposure_time)
+        
+        self.num_avg_sb = QtGui.QSpinBox()
+        self.num_avg_sb.setRange(1, 100)
+        self.num_avg_sb.setValue(self.parent.num_avg)
+        
+        self.pxsize_h_sb = QtGui.QDoubleSpinBox()
+        self.pxsize_h_sb.setValue(self.parent.pxsize_h)
+        
+        self.pxsize_v_sb = QtGui.QDoubleSpinBox()
+        self.pxsize_v_sb.setValue(self.parent.pxsize_v)
+        
+        # Layout
+        self.form_layout = QtGui.QFormLayout()
+        self.form_layout.addRow("Image update interval [ms]", self.image_update_sb)
+        self.form_layout.addRow("Exposure time [us]", self.exposure_sb)
+        self.form_layout.addRow("# of avg.", self.num_avg_sb)
+        self.form_layout.addRow("Pixel size (H) [um]", self.pxsize_h_sb)
+        self.form_layout.addRow("Pixel size (V) [um]", self.pxsize_v_sb)
+        
+        # Buttons
+        self.button_layout = QtGui.QHBoxLayout()
+        self.ok_button = QtGui.QPushButton('OK')
+        self.ok_button.clicked.connect(self.saveClose)
+        self.cancel_button = QtGui.QPushButton('Cancel')
+        self.cancel_button.clicked.connect(self.saveClose)
+        self.button_layout.addWidget(self.ok_button)
+        self.button_layout.addWidget(self.cancel_button)
+        
+        self.v_box = QtGui.QVBoxLayout()
+        self.v_box.addLayout(self.form_layout)
+        self.v_box.addLayout(self.button_layout)
+        self.setLayout(self.v_box)
+        
+    def saveClose(self):
+        sender = self.sender()
+        if sender.text() == 'OK':
+            self.parent.image_update_time = self.image_update_sb.value()
+            self.parent.exposure_time = self.exposure_sb.value()
+            self.parent.num_avg = self.num_avg_sb.value()
+            self.parent.pxsize_h = self.pxsize_h_sb.value()
+            self.parent.pxsize_v = self.pxsize_v_sb.value()
+            self.parent.updateParams()
+           
+        self.close()        
 if __name__ == '__main__':        
     app = QtGui.QApplication(sys.argv)
     win = ThorCamWindow()
