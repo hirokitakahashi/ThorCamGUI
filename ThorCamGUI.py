@@ -60,14 +60,29 @@ def GaussFit(x, y):
     popt, pcov = curve_fit(GaussFunc, x, y, p0)
     yfit = GaussFunc(x, popt[0], popt[1], popt[2], popt[3])
     return popt, yfit
+
+class cameraInfo(object):
+    def __init__(self, model=None, name=None, serial_number=None, image_width_px=None,
+                 image_height_px=None, px_width=None, px_height=None, exposure_time_range=None):
+        self.model = model
+        self.name = name
+        self.serial_number = serial_number
+        self.image_width_px = image_width_px
+        self.image_height_px = image_height_px
+        self.px_width = px_width
+        self.px_height = px_height
+        self.exposure_time_range = exposure_time_range
                      
 class ThorCamWindow(QtGui.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.initParams()
+        self.openCamera()
+        if self.camera:
+            self.getCameraInfo()
+            self.initParams()
+            self.initCamera()
         self.initUI()
         self.createMenu()
-        self.initCameras()
         # initialize fit data to None
         self.fit_h = None
         self.fit_v = None
@@ -77,17 +92,26 @@ class ThorCamWindow(QtGui.QMainWindow):
         if self.camera:
             self.timer = QtCore.QTimer()
             self.timer.timeout.connect(self.updateImage)
-            self.timer.start(10) # update image at every 10ms
+            self.timer.start(self.image_update_time) # update image at every xx ms
     
     def initParams(self):
-        self.image_update_time = 10 # 10ms
-        self.exposure_time = 110
+        self.image_update_time = 100 # 100ms
+        self.exposure_time = 100 # 100us
         self.num_avg = 1
-        self.pxsize_h = 3.45
-        self.pxsize_v = 3.45
+        self.img_count = 0 # image count for averaging
+        self.img_buffer = np.empty((self.num_avg, self.cameraInfo.image_height_px, 
+                                    self.cameraInfo.image_width_px))
+        self.pxsize_h = self.cameraInfo.px_width # pixel size horizontal
+        self.pxsize_v = self.cameraInfo.px_height # pixel size vertical
     
     def updateParams(self):
-        pass
+        self.timer.setInterval(self.image_update_time)
+        self.camera.exposure_time_us = self.exposure_time
+        self.img_cout = 0
+        self.img_buffer = np.empty((self.num_avg, self.cameraInfo.image_height_px, 
+                                    self.cameraInfo.image_width_px))
+        self.haxis = None
+        self.vaxis = None
     
     def initUI(self):
         self.setWindowTitle('Thorlab Camera Interface')
@@ -97,7 +121,7 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.vbox = QtGui.QVBoxLayout()
         self.hbox2 = QtGui.QHBoxLayout() # horizoantl layout in vbox
         self.vbox2L = QtGui.QVBoxLayout() # vertical layout in hbox2
-        self.vbox2R = QtGui.QHBoxLayout() # vertical layout in hbox2
+        self.vbox2R = QtGui.QVBoxLayout() # vertical layout in hbox2
         
         self.img = pg.ImageItem(border='w')
         # plots
@@ -107,7 +131,15 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.plot_v = pg.plot() # vertical projection
         self.data_v = self.plot_v.plot() # create PlotDataItem for vertical projection
         self.plot2D.addItem(self.img)
-        # buttons
+        
+        ###############################
+        # layout in bottom right corner
+        # hbox2 -- vbox2L -- fit_button
+        #       |         |_ w_form
+        #       |_ vbox2R -- stop_button
+        #                 |_ avg_cb
+        ################################
+        # vbox2L
         self.fit_button = QtGui.QPushButton("Fit", self)
         self.fit_button.clicked.connect(self.fitButtonClicked)
         self.wh_disp = QtGui.QLineEdit(self)
@@ -122,20 +154,32 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.vbox2L.addLayout(self.w_form)
         self.vbox2L.addStretch()
         
+        # vbox2R
         self.stop_button = QtGui.QPushButton("Stop", self)
-        self.stop_button.setStyleSheet('QPushButton {color: red;}')
+        self.stop_button.setStyleSheet("QPushButton {color: red;}")
         self.stop_button.clicked.connect(self.stopButtonClicked)
+        self.avg_cb = QtGui.QCheckBox("Enable averaging", self)
+        self.avg_cb.stateChanged.connect(self.avgCheckboxChanged)
+        self.avg_enabled = False
         
         self.vbox2R.addStretch()
         self.vbox2R.addWidget(self.stop_button)
         self.vbox2R.addStretch()
+        self.vbox2R.addWidget(self.avg_cb)
+        self.vbox2R.addStretch()
         
+        # hbox2
         self.hbox2.addStretch()
         self.hbox2.addLayout(self.vbox2L)
         self.hbox2.addStretch()
         self.hbox2.addLayout(self.vbox2R)
         self.hbox2.addStretch()
+        
         # arrange widgets
+        # hbox -- plot2D
+        #      |_ vbox -- plot_h
+        #              |_ plot_v
+        #              |_ hbox
         self.vbox.addWidget(self.plot_h)
         self.vbox.addWidget(self.plot_v)
         self.vbox.addLayout(self.hbox2)
@@ -174,7 +218,7 @@ class ThorCamWindow(QtGui.QMainWindow):
     def aboutDialog(self):
         QtGui.QMessageBox.about(self, "ThorCamGui", "This software displays the image of a Thorlab scientific camera.")
     
-    def initCameras(self):
+    def openCamera(self):
         self.sdk = TLCameraSDK()
         self.available_cameras = self.sdk.discover_available_cameras()
         if len(self.available_cameras) < 1:
@@ -182,7 +226,20 @@ class ThorCamWindow(QtGui.QMainWindow):
             self.camera = None
             return
         self.camera = self.sdk.open_camera(self.available_cameras[0])
-        self.camera.exposure_time_us = 110  # set exposure to .11 ms
+        
+    def getCameraInfo(self):
+        self.cameraInfo = cameraInfo()
+        self.cameraInfo.model = self.camera.model
+        self.cameraInfo.name = self.camera.name
+        self.cameraInfo.serial_number = self.camera.serial_number
+        self.cameraInfo.image_width_px = self.camera.sensor_width_pixels
+        self.cameraInfo.image_height_px = self.camera.sensor_height_pixels
+        self.cameraInfo.px_width = self.camera.sensor_pixel_width_um
+        self.cameraInfo.px_height = self.camera.sensor_pixel_height_um
+        self.cameraInfo.exposure_time_range = self.camera.exposure_time_range_us
+    
+    def initCamera(self):
+        self.camera.exposure_time_us =self.exposure_time  # set exposure to .11 ms
         self.camera.frames_per_trigger_zero_for_unlimited = 0  # start camera in continuous mode
         self.camera.image_poll_timeout_ms = 1000  # 1 second polling timeout
         #old_roi = self.camera.roi  # store the current roi
@@ -193,9 +250,22 @@ class ThorCamWindow(QtGui.QMainWindow):
         # get a frame from the camera and update the image
         frame = self.camera.get_pending_frame_or_null()
         if frame is not None:
-            self.image_buffer = np.copy(frame.image_buffer)
-            self.img.setImage(self.image_buffer)
-            self.proj_h, self.proj_v = self.getProjs(self.image_buffer)
+            image_copy = np.copy(frame.image_buffer)
+            if self.avg_enabled:
+                if self.img_count < self.num_avg:
+                    # buffer is not full
+                    self.img_buffer[self.img_count, :, :] = image_copy
+                    self.img_count += 1
+                else:
+                    # buffer is full
+                    self.img_buffer[0:-1, :, :] = self.img_buffer[1:, :, :]
+                    self.img_buffer[-1, :, :] = image_copy
+                image_data = self.img_buffer.sum(axis=0)/self.img_count
+            else:
+                # avg not enabled
+                image_data = image_copy
+            self.img.setImage(image_data)
+            self.proj_h, self.proj_v = self.getProjs(image_data)
             if self.haxis is None or self.vaxis is None:
                 self.haxis = self.pxsize_h*np.arange(0, len(self.proj_h))
                 self.vaxis = self.pxsize_v*np.arange(0, len(self.proj_v))
@@ -215,6 +285,13 @@ class ThorCamWindow(QtGui.QMainWindow):
             self.timer.start()
             self.stop_button.setText('Stop')
     
+    def avgCheckboxChanged(self, state):
+        if state == QtCore.Qt.Checked:
+            self.avg_enabled = True
+        else:
+            self.avg_enabled = False
+        
+    
     def fitButtonClicked(self):
         popt_h, yfit_h = GaussFit(self.haxis, self.proj_h)
         popt_v, yfit_v = GaussFit(self.vaxis, self.proj_v)
@@ -229,8 +306,8 @@ class ThorCamWindow(QtGui.QMainWindow):
             self.plot_v.addItem(self.fit_v)
         else:
             self.fit_v.setData(self.vaxis, yfit_v, pen={'color': 'r', 'width': 1})
-        self.wh_disp.setText(str(popt_h[2]))
-        self.wv_disp.setText(str(popt_v[2]))
+        self.wh_disp.setText('{:.3f}'.format(popt_h[2]))
+        self.wv_disp.setText('{:.3f}'.format(popt_v[2]))
         
     
     def closeEvent(self, event):
