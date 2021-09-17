@@ -7,7 +7,7 @@ Created on Tue Aug  3 16:31:39 2021
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtGui, QtCore
 import numpy as np
-import sys
+import sys, csv
 from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
 from scipy.optimize import curve_fit
 
@@ -89,6 +89,8 @@ class ThorCamWindow(QtGui.QMainWindow):
         # initialize h and v axis to None
         self.haxis = None
         self.vaxis = None
+        # initialize table view
+        self.table_view = None
         if self.camera:
             self.timer = QtCore.QTimer()
             self.timer.timeout.connect(self.updateImage)
@@ -135,9 +137,10 @@ class ThorCamWindow(QtGui.QMainWindow):
         ###############################
         # layout in bottom right corner
         # hbox2 -- vbox2L -- fit_button
+        #       |         |_ store_button
         #       |         |_ w_form
-        #       |_ vbox2R -- stop_button
-        #                 |_ avg_cb
+        #       |_ vbox2R -- avg_cb
+        #                 |_ stop_button
         ################################
         # vbox2L
         self.fit_button = QtGui.QPushButton("Fit", self)
@@ -147,12 +150,16 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.w_form = QtGui.QFormLayout()
         self.w_form.addRow("w (H):", self.wh_disp)
         self.w_form.addRow("w (V):", self.wv_disp)
+        self.store_button = QtGui.QPushButton("Store fit values", self)
+        self.store_button.clicked.connect(self.storeButtonClicked)
+        
         
         self.vbox2L.addStretch()
         self.vbox2L.addWidget(self.fit_button)
         self.vbox2L.addStretch()
-        self.vbox2L.addLayout(self.w_form)
+        self.vbox2L.addWidget(self.store_button)
         self.vbox2L.addStretch()
+        self.vbox2L.addLayout(self.w_form)
         
         # vbox2R
         self.stop_button = QtGui.QPushButton("Stop", self)
@@ -163,9 +170,9 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.avg_enabled = False
         
         self.vbox2R.addStretch()
-        self.vbox2R.addWidget(self.stop_button)
-        self.vbox2R.addStretch()
         self.vbox2R.addWidget(self.avg_cb)
+        self.vbox2R.addStretch()
+        self.vbox2R.addWidget(self.stop_button)
         self.vbox2R.addStretch()
         
         # hbox2
@@ -191,11 +198,11 @@ class ThorCamWindow(QtGui.QMainWindow):
         
     def createMenu(self):
         # create menubar
-        menu_bar = self.menuBar()
+        self.menu_bar = self.menuBar()
         
-        file_menu = menu_bar.addMenu('File')
-        tools_menu = menu_bar.addMenu('Tools')
-        help_menu = menu_bar.addMenu('Help')
+        self.file_menu = self.menu_bar.addMenu('File')
+        self.tools_menu = self.menu_bar.addMenu('Tools')
+        self.help_menu = self.menu_bar.addMenu('Help')
         
         # Define actions
         exit_act = QtGui.QAction('Exit', self)
@@ -207,10 +214,10 @@ class ThorCamWindow(QtGui.QMainWindow):
         about_act = QtGui.QAction('About', self)
         about_act.triggered.connect(self.aboutDialog)
         
-        file_menu.addSeparator()
-        file_menu.addAction(exit_act)
-        tools_menu.addAction(settings_act)
-        help_menu.addAction(about_act)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(exit_act)
+        self.tools_menu.addAction(settings_act)
+        self.help_menu.addAction(about_act)
     
     def openSettingsDialog(self):
         self.sdialog = SettingsDialog(self)
@@ -290,8 +297,7 @@ class ThorCamWindow(QtGui.QMainWindow):
             self.avg_enabled = True
         else:
             self.avg_enabled = False
-        
-    
+           
     def fitButtonClicked(self):
         popt_h, yfit_h = GaussFit(self.haxis, self.proj_h)
         popt_v, yfit_v = GaussFit(self.vaxis, self.proj_v)
@@ -309,12 +315,32 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.wh_disp.setText('{:.3f}'.format(popt_h[2]))
         self.wv_disp.setText('{:.3f}'.format(popt_v[2]))
         
-    
+    def storeButtonClicked(self):
+        wh = self.wh_disp.text()
+        wv = self.wv_disp.text()
+        if self.table_view is None:
+            self.table_view = TableWindow(self, [wh, wv])
+            pw = self.width()
+            px = self.x()
+            py = self.y()
+            dw = self.table_view.width()
+            dh = self.table_view.height()
+            self.table_view.setGeometry(px+pw, py, dw, dh)
+            self.table_view.show()
+        elif self.table_view.isVisible() is not True:
+            self.table_view.addData([wh, wv])
+            self.table_view.show()
+        else:
+            self.table_view.addData([wh, wv])
+            
     def closeEvent(self, event):
         # override the closing behaviour
-        self.camera.dispose()
+        if self.camera:
+            self.timer.stop()
+            self.camera.dispose()
         self.sdk.dispose()
-        self.timer.stop()
+        if self.table_view.isVisible():
+            self.table_view.close()
         event.accept()
 
 class SettingsDialog(QtGui.QWidget):
@@ -380,7 +406,93 @@ class SettingsDialog(QtGui.QWidget):
             self.parent.pxsize_v = self.pxsize_v_sb.value()
             self.parent.updateParams()
            
-        self.close()        
+        self.close()
+
+class TableWindow(QtGui.QMainWindow):
+    def __init__(self, parent, data):
+        super().__init__()
+        self.data = data
+        self.parent = parent
+        self.initUI()
+        self.table.resizeColumnsToContents()
+        #self.table.resizeRowsToContents()
+        self.createMenu()
+    
+    def initUI(self):
+        self.table = QtGui.QTableWidget(1, 3)
+        for i, d in enumerate(self.data):
+            newitem = QtGui.QTableWidgetItem(str(d))
+            self.table.setItem(0, i, newitem)
+        self.table.setHorizontalHeaderLabels(['wh', 'wv', 'z'])
+        self.setWindowTitle('Fit values')
+        self.setCentralWidget(self.table)
+        self.resize(QtCore.QSize(700, 800))
+        
+    def addData(self, data):
+        rowPosition = self.table.rowCount()
+        self.table.insertRow(rowPosition)
+        for i, d in enumerate(data):
+            newitem = QtGui.QTableWidgetItem(str(d))
+            self.table.setItem(rowPosition, i, newitem)
+    
+    def createMenu(self):
+        # create menubar
+        self.menu_bar = self.menuBar()
+        
+        file_menu = self.menu_bar.addMenu('File')
+        edit_menu = self.menu_bar.addMenu('Edit')
+        
+        # Define actions
+        exit_act = QtGui.QAction('Exit', self)
+        exit_act.setShortcut('Çtrl+Q')
+        exit_act.triggered.connect(self.close)
+        
+        save_act = QtGui.QAction('Save', self)
+        save_act.setShortcut('Çtrl+S')
+        save_act.triggered.connect(self.saveData)
+        
+        insert_below_act = QtGui.QAction('Insert row below', self)
+        insert_below_act.triggered.connect(self.insertBelow)
+        insert_above_act = QtGui.QAction('Insert row above', self)
+        insert_above_act.triggered.connect(self.insertAbove)
+        remove_act = QtGui.QAction('Remove row', self)
+        remove_act.triggered.connect(self.removeRow)
+        
+        file_menu.addAction(save_act)
+        file_menu.addSeparator()
+        file_menu.addAction(exit_act)
+        
+        edit_menu.addAction(insert_below_act)
+        edit_menu.addAction(insert_above_act)
+        edit_menu.addAction(remove_act)
+        
+    def saveData(self):
+        path = QtGui.QFileDialog.getSaveFileName(self, 'Save File', '', 'CSV(*.csv)')
+        if not path[0] is None:
+            with open(path[0], 'w', encoding='UTF8', newline='') as stream:
+                writer = csv.writer(stream)
+                for row in range(self.table.rowCount()):
+                    rowdata = []
+                    for column in range(self.table.columnCount()):
+                        item = self.table.item(row, column)
+                        if item is not None:
+                            rowdata.append(item.text())
+                        else:
+                            rowdata.append('')
+                    writer.writerow(rowdata)
+    
+    def insertAbove(self):
+        rowPosition = self.table.currentRow()
+        self.table.insertRow(rowPosition)
+        
+    def insertBelow(self):
+        rowPosition = self.table.currentRow()
+        self.table.insertRow(rowPosition+1)
+    
+    def removeRow(self):
+        rowPosition = self.table.currentRow()
+        self.table.removeRow(rowPosition)
+
 if __name__ == '__main__':        
     app = QtGui.QApplication(sys.argv)
     win = ThorCamWindow()
