@@ -8,7 +8,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtGui, QtCore
 import numpy as np
 import sys, csv
-from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
+from thorlabs_tsi_sdk.tl_camera import TLCameraSDK, ROI
 from scipy.optimize import curve_fit
 
 try:
@@ -19,7 +19,7 @@ except ImportError:
     configure_path = None
 
 def GaussFunc(x, A=1, x0=0, s=1, d=0):
-    return A*np.exp(-(x-x0)**2/s**2)+d
+    return A*np.exp(-(x-x0)**2/(2*s**2))+d
 
 def check_concave(x, y):
     # This function checks if the given dataset is concave or not.
@@ -58,6 +58,7 @@ def EstimateGaussIni(x, y):
 def GaussFit(x, y):
     p0 = EstimateGaussIni(x, y)
     popt, pcov = curve_fit(GaussFunc, x, y, p0)
+    popt[2] = np.abs(popt[2]) # standard deviation can be negative
     yfit = GaussFunc(x, popt[0], popt[1], popt[2], popt[3])
     return popt, yfit
 
@@ -91,6 +92,8 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.vaxis = None
         # initialize table view
         self.table_view = None
+        # ROI
+        self.roi = self.camera.roi 
         if self.camera:
             self.timer = QtCore.QTimer()
             self.timer.timeout.connect(self.updateImage)
@@ -101,19 +104,45 @@ class ThorCamWindow(QtGui.QMainWindow):
         self.exposure_time = 100 # 100us
         self.num_avg = 1
         self.img_count = 0 # image count for averaging
-        self.img_buffer = np.empty((self.num_avg, self.cameraInfo.image_height_px, 
-                                    self.cameraInfo.image_width_px))
+        roi = self.camera.roi
+        height_px = roi.lower_right_x_pixels-roi.upper_left_x_pixels+1
+        width_px = roi.lower_right_y_pixels-roi.upper_left_y_pixels+1
+        self.img_buffer = np.empty((self.num_avg, height_px, width_px))
+        #self.img_buffer = np.empty((self.num_avg, self.cameraInfo.image_height_px, 
+        #                            self.cameraInfo.image_width_px))
         self.pxsize_h = self.cameraInfo.px_width # pixel size horizontal
         self.pxsize_v = self.cameraInfo.px_height # pixel size vertical
     
     def updateParams(self):
+        self.timer.stop()
         self.timer.setInterval(self.image_update_time)
         self.camera.exposure_time_us = self.exposure_time
         self.img_cout = 0
-        self.img_buffer = np.empty((self.num_avg, self.cameraInfo.image_height_px, 
-                                    self.cameraInfo.image_width_px))
+        roi = self.camera.roi
+        height_px = roi.lower_right_x_pixels-roi.upper_left_x_pixels+1
+        width_px = roi.lower_right_y_pixels-roi.upper_left_y_pixels+1
+        self.img_buffer = np.empty((self.num_avg, height_px, width_px))
+        #self.img_buffer = np.empty((self.num_avg, self.cameraInfo.image_height_px, 
+        #                            self.cameraInfo.image_width_px))
         self.haxis = None
         self.vaxis = None
+        self.timer.start()
+    
+    def updateROI(self):
+        self.timer.stop()
+        self.camera.disarm()
+        self.camera.roi =self.roi
+        # Mapping of self.roi to self.camera.roi is non-trivial
+        # So roi below is not necessarily the same as self.roi
+        roi = self.camera.roi
+        height_px = roi.lower_right_x_pixels-roi.upper_left_x_pixels+1
+        width_px = roi.lower_right_y_pixels-roi.upper_left_y_pixels+1
+        self.img_buffer = np.empty((self.num_avg, height_px, width_px))
+        self.haxis = None
+        self.vaxis = None
+        self.camera.arm(2)
+        self.timer.start()
+        self.camera.issue_software_trigger()
     
     def initUI(self):
         self.setWindowTitle('Thorlab Camera Interface')
@@ -209,18 +238,57 @@ class ThorCamWindow(QtGui.QMainWindow):
         exit_act.setShortcut('Çtrl+Q')
         exit_act.triggered.connect(self.close)
         
+        save_img_act = QtGui.QAction('Save image', self)
+        save_img_act.triggered.connect(self.saveImage)
+        
+        show_tab_act = QtGui.QAction('Show table', self)
+        show_tab_act.triggered.connect(self.showTable)
+        
         settings_act = QtGui.QAction('Settings', self)
         settings_act.triggered.connect(self.openSettingsDialog)
+        
+        roi_act = QtGui.QAction('Set ROI', self)
+        roi_act.triggered.connect(self.setROI)
+        
         about_act = QtGui.QAction('About', self)
         about_act.triggered.connect(self.aboutDialog)
         
+        self.file_menu.addAction(save_img_act)
         self.file_menu.addSeparator()
         self.file_menu.addAction(exit_act)
+        self.tools_menu.addAction(roi_act)
+        self.tools_menu.addAction(show_tab_act)
         self.tools_menu.addAction(settings_act)
         self.help_menu.addAction(about_act)
     
     def openSettingsDialog(self):
         self.sdialog = SettingsDialog(self)
+        
+    def saveImage(self):
+        path = QtGui.QFileDialog.getSaveFileName(self, 'Save Image', '', 'CSV(*.csv)')
+        if not path[0] is None:
+            with open(path[0], 'w', encoding='UTF8', newline='') as stream:
+                writer = csv.writer(stream)
+                writer.writerows(self.image_data)
+    
+    def setROI(self):
+        old_roi = self.camera.roi  # store the current roi
+        roi_range = self.camera.roi_range
+        self.roi_dialog = roiDialog(self, old_roi, roi_range)
+    
+    def showTable(self):
+        if self.table_view is not None:
+            self.table_view.show()
+        else:
+            # table view has not been created.
+            self.table_view = TableWindow(self, None)
+            pw = self.width()
+            px = self.x()
+            py = self.y()
+            dw = self.table_view.width()
+            dh = self.table_view.height()
+            self.table_view.setGeometry(px+pw, py, dw, dh)
+            self.table_view.show()
         
     def aboutDialog(self):
         QtGui.QMessageBox.about(self, "ThorCamGui", "This software displays the image of a Thorlab scientific camera.")
@@ -263,16 +331,17 @@ class ThorCamWindow(QtGui.QMainWindow):
                     # buffer is not full
                     self.img_buffer[self.img_count, :, :] = image_copy
                     self.img_count += 1
+                    self.image_data = self.img_buffer.sum(axis=0)/self.img_count
                 else:
                     # buffer is full
                     self.img_buffer[0:-1, :, :] = self.img_buffer[1:, :, :]
                     self.img_buffer[-1, :, :] = image_copy
-                image_data = self.img_buffer.sum(axis=0)/self.img_count
+                    self.image_data = self.img_buffer.sum(axis=0)/self.num_avg
             else:
                 # avg not enabled
-                image_data = image_copy
-            self.img.setImage(image_data)
-            self.proj_h, self.proj_v = self.getProjs(image_data)
+                self.image_data = image_copy
+            self.img.setImage(self.image_data)
+            self.proj_h, self.proj_v = self.getProjs(self.image_data)
             if self.haxis is None or self.vaxis is None:
                 self.haxis = self.pxsize_h*np.arange(0, len(self.proj_h))
                 self.vaxis = self.pxsize_v*np.arange(0, len(self.proj_v))
@@ -312,8 +381,8 @@ class ThorCamWindow(QtGui.QMainWindow):
             self.plot_v.addItem(self.fit_v)
         else:
             self.fit_v.setData(self.vaxis, yfit_v, pen={'color': 'r', 'width': 1})
-        self.wh_disp.setText('{:.3f}'.format(popt_h[2]))
-        self.wv_disp.setText('{:.3f}'.format(popt_v[2]))
+        self.wh_disp.setText('{:.3f}'.format(2*popt_h[2]))
+        self.wv_disp.setText('{:.3f}'.format(2*popt_v[2]))
         
     def storeButtonClicked(self):
         wh = self.wh_disp.text()
@@ -339,7 +408,7 @@ class ThorCamWindow(QtGui.QMainWindow):
             self.timer.stop()
             self.camera.dispose()
         self.sdk.dispose()
-        if self.table_view.isVisible():
+        if self.table_view is not None and self.table_view.isVisible():
             self.table_view.close()
         event.accept()
 
@@ -405,8 +474,84 @@ class SettingsDialog(QtGui.QWidget):
             self.parent.pxsize_h = self.pxsize_h_sb.value()
             self.parent.pxsize_v = self.pxsize_v_sb.value()
             self.parent.updateParams()
-           
         self.close()
+
+class roiDialog(QtGui.QDialog):
+    def __init__(self, parent, current_roi, roi_range):
+        super().__init__()
+        self.range = roi_range
+        self.current_roi = current_roi
+        self.parent = parent
+        self.initUI()
+        
+    def initUI(self):
+        self.setGeometry(300, 300, 500, 500)
+        self.setWindowTitle("ThorCam ROI settings")
+        self.createWidgets()
+        self.show()
+    
+    def createWidgets(self):
+        self.roi_xmin_sb = QtGui.QSpinBox()
+        self.roi_xmin_sb.setRange(self.range.upper_left_x_pixels_min, self.range.upper_left_x_pixels_max)
+        self.roi_xmin_sb.setValue(self.current_roi.upper_left_x_pixels)
+        
+        self.roi_xmax_sb = QtGui.QSpinBox()
+        self.roi_xmax_sb.setRange(self.range.lower_right_x_pixels_min, self.range.lower_right_x_pixels_max)
+        self.roi_xmax_sb.setValue(self.current_roi.lower_right_x_pixels)
+        
+        self.roi_ymin_sb = QtGui.QSpinBox()
+        self.roi_ymin_sb.setRange(self.range.upper_left_y_pixels_min, self.range.upper_left_y_pixels_max)
+        self.roi_ymin_sb.setValue(self.current_roi.upper_left_y_pixels)
+        
+        self.roi_ymax_sb = QtGui.QSpinBox()
+        self.roi_ymax_sb.setRange(self.range.lower_right_y_pixels_min, self.range.lower_right_y_pixels_max)
+        self.roi_ymax_sb.setValue(self.current_roi.lower_right_y_pixels)
+        
+        # Layout
+        self.form_layout = QtGui.QFormLayout()
+        self.form_layout.addRow("ROI H min", self.roi_ymin_sb)
+        self.form_layout.addRow("ROI H max", self.roi_ymax_sb)
+        self.form_layout.addRow("ROI V min", self.roi_xmin_sb)
+        self.form_layout.addRow("ROI V max", self.roi_xmax_sb)
+        
+        # Buttons
+        self.max_button = QtGui.QPushButton('Maximize')
+        self.max_button.clicked.connect(self.max_button_clicked)
+        self.button_layout = QtGui.QHBoxLayout()
+        self.ok_button = QtGui.QPushButton('OK')
+        self.ok_button.clicked.connect(self.saveClose)
+        self.cancel_button = QtGui.QPushButton('Cancel')
+        self.cancel_button.clicked.connect(self.saveClose)
+        self.button_layout.addWidget(self.ok_button)
+        self.button_layout.addWidget(self.cancel_button)
+        
+        self.v_box = QtGui.QVBoxLayout()
+        self.v_box.addStretch()
+        self.v_box.addLayout(self.form_layout)
+        self.v_box.addStretch()
+        self.v_box.addWidget(self.max_button)
+        self.v_box.addStretch()
+        self.v_box.addLayout(self.button_layout)
+        self.v_box.addStretch()
+        self.setLayout(self.v_box)
+    
+    def max_button_clicked(self):
+        self.roi_xmin_sb.setValue(self.range.upper_left_x_pixels_min)
+        self.roi_xmax_sb.setValue(self.range.lower_right_x_pixels_max)
+        self.roi_ymin_sb.setValue(self.range.upper_left_y_pixels_min)
+        self.roi_ymax_sb.setValue(self.range.lower_right_y_pixels_max)
+    
+    def saveClose(self):
+        sender = self.sender()
+        if sender.text() == 'OK':
+            xmin = self.roi_xmin_sb.value()
+            xmax = self.roi_xmax_sb.value()
+            ymin = self.roi_ymin_sb.value()
+            ymax = self.roi_ymax_sb.value()
+            self.parent.roi = ROI(xmin, ymin, xmax, ymax)
+            self.parent.updateROI()
+        self.close()
+
 
 class TableWindow(QtGui.QMainWindow):
     def __init__(self, parent, data):
@@ -419,10 +564,13 @@ class TableWindow(QtGui.QMainWindow):
         self.createMenu()
     
     def initUI(self):
-        self.table = QtGui.QTableWidget(1, 3)
-        for i, d in enumerate(self.data):
-            newitem = QtGui.QTableWidgetItem(str(d))
-            self.table.setItem(0, i, newitem)
+        if self.data is None:
+            self.table = QtGui.QTableWidget(0, 3)
+        else:
+            self.table = QtGui.QTableWidget(1, 3)
+            for i, d in enumerate(self.data):
+                newitem = QtGui.QTableWidgetItem(str(d))
+                self.table.setItem(0, i, newitem)
         self.table.setHorizontalHeaderLabels(['wh', 'wv', 'z'])
         self.setWindowTitle('Fit values')
         self.setCentralWidget(self.table)
@@ -451,6 +599,9 @@ class TableWindow(QtGui.QMainWindow):
         save_act.setShortcut('Çtrl+S')
         save_act.triggered.connect(self.saveData)
         
+        load_act = QtGui.QAction('Load', self)
+        load_act.triggered.connect(self.loadData)
+        
         insert_below_act = QtGui.QAction('Insert row below', self)
         insert_below_act.triggered.connect(self.insertBelow)
         insert_above_act = QtGui.QAction('Insert row above', self)
@@ -458,6 +609,7 @@ class TableWindow(QtGui.QMainWindow):
         remove_act = QtGui.QAction('Remove row', self)
         remove_act.triggered.connect(self.removeRow)
         
+        file_menu.addAction(load_act)
         file_menu.addAction(save_act)
         file_menu.addSeparator()
         file_menu.addAction(exit_act)
@@ -480,6 +632,20 @@ class TableWindow(QtGui.QMainWindow):
                         else:
                             rowdata.append('')
                     writer.writerow(rowdata)
+    
+    def loadData(self):
+        path = QtGui.QFileDialog.getOpenFileName(self, 'Open File', '', 'CSV(*.csv)')
+        if not path[0] is None:
+            print(path[0])
+            with open(path[0]) as stream:
+                reader = csv.reader(stream)
+                rowPosition = self.table.currentRow()
+                for i, row in enumerate(reader):
+                    self.table.insertRow(rowPosition+i+1)
+                    for j, d in enumerate(row):
+                        newitem = QtGui.QTableWidgetItem(str(d))
+                        self.table.setItem(rowPosition+i+1, j, newitem)
+            self.table.resizeColumnsToContents()
     
     def insertAbove(self):
         rowPosition = self.table.currentRow()
